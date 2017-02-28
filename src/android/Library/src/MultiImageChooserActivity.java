@@ -34,8 +34,10 @@ import java.net.URI;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -66,6 +68,7 @@ import android.support.v7.app.ActionBar;
 import android.support.v7.app.AppCompatActivity;
 import android.util.Base64;
 import android.util.SparseBooleanArray;
+import android.util.Log;
 import android.view.Display;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -112,6 +115,8 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
     private int quality;
     private OutputType outputType;
 
+    private boolean useOriginal;
+    
     private final ImageFetcher fetcher = new ImageFetcher();
 
     private int selectedColor = 0xff32b2e1;
@@ -137,6 +142,8 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
         maxImageCount = maxImages;
         outputType = OutputType.fromValue(getIntent().getIntExtra(OUTPUT_TYPE_KEY, 0));
 
+        useOriginal = (desiredWidth == 0 && desiredHeight == 0 && quality == 100);
+        
         Display display = getWindowManager().getDefaultDisplay();
         int width = display.getWidth();
 
@@ -312,14 +319,16 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
     public void selectClicked() {
         abDiscardView.setEnabled(false);
         abDoneView.setEnabled(false);
-        progress.show();
+        if (!useOriginal)
+            // Copying original files is so fast that we don't want the progress
+            progress.show();
 
         if (fileNames.isEmpty()) {
             setResult(RESULT_CANCELED);
             progress.dismiss();
             finish();
         } else {
-	        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_NOSENSOR); //prevent orientation changes during processing
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_NOSENSOR); //prevent orientation changes during processing
             new ResizeImagesTask().execute(fileNames.entrySet());
         }
     }
@@ -518,6 +527,13 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
                 while (i.hasNext()) {
                     Entry<String, Integer> imageInfo = i.next();
                     File file = new File(imageInfo.getKey());
+
+                    if (useOriginal) {
+                        File copy = storeOriginal(file, file.getName());
+                        al.add(Uri.fromFile(copy).toString());
+                        continue;
+                    }
+                    
                     int rotate = imageInfo.getValue();
                     BitmapFactory.Options options = new BitmapFactory.Options();
                     options.inSampleSize = 1;
@@ -526,7 +542,7 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
                     int width = options.outWidth;
                     int height = options.outHeight;
                     float scale = calculateScale(width, height);
-
+                    
                     if (scale < 1) {
                         int finalWidth = (int)(width * scale);
                         int finalHeight = (int)(height * scale);
@@ -576,6 +592,7 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
                 }
                 return al;
             } catch (IOException e) {
+                Log.e(TAG, "Exception: " + e.toString());
                 try {
                     asyncTaskError = e;
                     for (int i = 0; i < al.size(); i++) {
@@ -658,21 +675,39 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
         * Copyright (C) 2012, webXells GmbH All Rights Reserved.
         */
         private File storeImage(Bitmap bmp, String fileName) throws IOException {
-            int index = fileName.lastIndexOf('.');
-            String name = fileName.substring(0, index);
-            String ext = fileName.substring(index);
-            File file = File.createTempFile("tmp_" + name, ext);
+            File file = tempFile(fileName);
             OutputStream outStream = new FileOutputStream(file);
-
-            if (ext.compareToIgnoreCase(".png") == 0) {
-                bmp.compress(Bitmap.CompressFormat.PNG, quality, outStream);
-            } else {
-                bmp.compress(Bitmap.CompressFormat.JPEG, quality, outStream);
-            }
-
+            bmp.compress(getFormat(fileName), quality, outStream);
             outStream.flush();
             outStream.close();
             return file;
+        }
+
+        private Bitmap.CompressFormat getFormat(String fileName) {
+            int index = fileName.lastIndexOf('.');
+            String ext = fileName.substring(index);
+            if (ext.compareToIgnoreCase(".png") == 0)
+                return Bitmap.CompressFormat.PNG;
+            return Bitmap.CompressFormat.JPEG;
+        }
+        
+        private File storeOriginal(File orig, String fileName) throws IOException {
+            File file = tempFile(fileName);
+            FileInputStream inStream = new FileInputStream(orig);
+            FileOutputStream outStream = new FileOutputStream(file);
+            FileChannel inChannel = inStream.getChannel();
+            FileChannel outChannel = outStream.getChannel();
+            inChannel.transferTo(0, inChannel.size(), outChannel);
+            inStream.close();
+            outStream.close();
+            return file;
+       }
+
+        private File tempFile(String fileName) throws IOException {
+            int index = fileName.lastIndexOf('.');
+            String name = fileName.substring(0, index);
+            String ext = fileName.substring(index);
+            return File.createTempFile("tmp_" + name, ext);
         }
 
         private Bitmap getResizedBitmap(Bitmap bm, float factor) {
